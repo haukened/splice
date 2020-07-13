@@ -152,7 +152,8 @@ func actStartNode(c *cli.Context) error {
 				if check(err) {
 					return
 				}
-				fmt.Printf("%s: %s\n", ctx.ID.Host.String(), string(buf))
+				ident := ctx.ID.Pub.String()
+				fmt.Printf("%s: %s\n", ident[len(ident)-6:], string(buf))
 			},
 		},
 	}
