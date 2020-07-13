@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/lithdew/flatend"
+	"github.com/thibran/pubip"
 	"github.com/urfave/cli/v2"
 	"gitlab.com/NebulousLabs/go-upnp"
 	"go.uber.org/zap"
@@ -68,10 +69,6 @@ func run(args []string, stdout, stderr io.Writer) error {
 				Aliases: []string{"peer"},
 				Usage:   "Connect to a known host:port to perform boostrapping",
 			},
-			&cli.StringFlag{
-				Name:  "public-address",
-				Usage: "Your public IP address, required if UPnP discovery is disabled",
-			},
 			/*&cli.PathFlag{
 				Name:    "load-private-key",
 				Aliases: []string{"l"},
@@ -95,7 +92,7 @@ func actStartNode(c *cli.Context) error {
 		//PrivateKeyPath = c.Path("load-private-key")
 		disableUPnP = c.Bool("disable-upnp")
 		peer        = c.String("bootstrap-peer")
-		publicIP    = c.String("public-address")
+		publicIP    string
 	)
 
 	// set up a logger
@@ -118,22 +115,30 @@ func actStartNode(c *cli.Context) error {
 		return fmt.Errorf("'%d' is an invalid port", localPort)
 	}
 	bindPort := uint16(localPort)
+	logger.Sugar().Debugf("Setting port to %d", bindPort)
 
 	// set up UPnP if required
 	if !disableUPnP {
-		err = forwardUpnpPort(bindPort)
+		logger.Debug("Sending UPnP router discovery")
+		router, err := discoverUpnpRouter()
+		if check(err) {
+			return err
+		}
+		logger.Sugar().Debugf("UPnP router discovered at %s", router)
+		err = forwardUpnpPort(router, bindPort)
 		if check(err) {
 			return err
 		}
 		logger.Sugar().Debugf("UPnP successfully forwarded port %d", bindPort)
 		// get public IP address using UPnP
-		publicIP, err = getPublicIPAddress()
+		publicIP, err = getUpnpPublicAddress(router)
 		if check(err) {
 			return err
 		}
 		logger.Sugar().Debugf("setting node public IP address to %s", publicIP)
 	} else if publicIP == "" {
-		return fmt.Errorf("public ip address is required if UPnP is disabled")
+		publicIP, err = getPublicIPAddress()
+		logger.Sugar().Debugf("setting node public IP address to %s", publicIP)
 	}
 
 	// set up the server node
@@ -151,8 +156,8 @@ func actStartNode(c *cli.Context) error {
 			},
 		},
 	}
-	defer node.Shutdown()
 	err = node.Start(peer)
+	defer node.Shutdown()
 
 	// then process input and declare us as a chat provider
 	br := bufio.NewReader(os.Stdin)
@@ -176,14 +181,25 @@ func actStartNode(c *cli.Context) error {
 	}
 }
 
-func forwardUpnpPort(port uint16) error {
-	// connect UPnP to router
-	d, err := upnp.Discover()
+func discoverUpnpRouter() (routerAddress string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d, err := upnp.DiscoverCtx(ctx)
 	if check(err) {
-		return fmt.Errorf("upnp is unable to discover your router: %v", err)
+		return
+	}
+	routerAddress = d.Location()
+	return
+}
+
+func forwardUpnpPort(routerAddress string, port uint16) error {
+	// connect UPnP to router
+	d, err := upnp.Load(routerAddress)
+	if check(err) {
+		return fmt.Errorf("upnp is unable to connect to your router: %v", err)
 	}
 	// check if port is already forwarded
-	isFwd, err := d.IsForwardedTCP(52386)
+	isFwd, err := d.IsForwardedTCP(port)
 	if check(err) {
 		return fmt.Errorf("upnp is unable to check if port %d is already forwarded: %v", port, err)
 	}
@@ -191,19 +207,18 @@ func forwardUpnpPort(port uint16) error {
 		return nil
 	}
 	// forward a port
-	err = d.Forward(52386, "haukened/splice")
+	err = d.Forward(port, "haukened/splice")
 	if check(err) {
 		return fmt.Errorf("upnp is unable to forward port %d: %v", port, err)
 	}
 	return nil
 }
 
-func clearUpnpPort(port uint16) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	d, err := upnp.DiscoverCtx(ctx)
+func clearUpnpPort(routerAddress string, port uint16) error {
+	// connect UPnP to router
+	d, err := upnp.Load(routerAddress)
 	if check(err) {
-		return err
+		return fmt.Errorf("upnp is unable to connect to your router: %v", err)
 	}
 	err = d.Clear(port)
 	if check(err) {
@@ -212,12 +227,22 @@ func clearUpnpPort(port uint16) error {
 	return nil
 }
 
-func getPublicIPAddress() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	d, err := upnp.DiscoverCtx(ctx)
+func getUpnpPublicAddress(routerAddress string) (ipAddress string, err error) {
+	// connect UPnP to router
+	d, err := upnp.Load(routerAddress)
 	if check(err) {
-		return "", err
+		err = fmt.Errorf("upnp is unable to connect to your router: %v", err)
+		return
 	}
-	return d.ExternalIP()
+	ipAddress, err = d.ExternalIP()
+	return
+}
+
+func getPublicIPAddress() (ipAddress string, err error) {
+	// do a parallel query of 4 services to ensure if one is blocked we can get an address
+	m := pubip.NewMaster()
+	m.Parallel = 4
+	m.Format = pubip.IPv4
+	ipAddress, err = m.Address()
+	return
 }
