@@ -58,12 +58,6 @@ func run(args []string, stdout, stderr io.Writer) error {
 				Usage:   "Enable debugging mode.",
 				Value:   false,
 			},
-			&cli.BoolFlag{
-				Name:    "disable-upnp",
-				Aliases: []string{"noupnp"},
-				Usage:   "Disables UPnP port forwarding",
-				Value:   false,
-			},
 			&cli.StringFlag{
 				Name:    "bootstrap-peer",
 				Aliases: []string{"peer"},
@@ -90,9 +84,8 @@ func actStartNode(c *cli.Context) error {
 		localPort = c.Uint("port")
 		debug     = c.Bool("debug")
 		//PrivateKeyPath = c.Path("load-private-key")
-		disableUPnP = c.Bool("disable-upnp")
-		peer        = c.String("bootstrap-peer")
-		publicIP    string
+		peer     = c.String("bootstrap-peer")
+		publicIP string
 	)
 
 	// set up a logger
@@ -117,13 +110,12 @@ func actStartNode(c *cli.Context) error {
 	bindPort := uint16(localPort)
 	logger.Sugar().Debugf("Setting port to %d", bindPort)
 
+	// detect UPnP
+	logger.Debug("attempting UPnP detection")
+	router, _ := discoverUpnpRouter()
+
 	// set up UPnP if required
-	if !disableUPnP {
-		logger.Debug("Sending UPnP router discovery")
-		router, err := discoverUpnpRouter()
-		if check(err) {
-			return err
-		}
+	if router != "" {
 		logger.Sugar().Debugf("UPnP router discovered at %s", router)
 		err = forwardUpnpPort(router, bindPort)
 		if check(err) {
@@ -137,6 +129,7 @@ func actStartNode(c *cli.Context) error {
 		}
 		logger.Sugar().Debugf("setting node public IP address to %s", publicIP)
 	} else if publicIP == "" {
+		logger.Debug("Unable to detect UPnP on this network, only outbound connections will be allowed and functionality may be limited")
 		publicIP, err = getPublicIPAddress()
 		logger.Sugar().Debugf("setting node public IP address to %s", publicIP)
 	}
